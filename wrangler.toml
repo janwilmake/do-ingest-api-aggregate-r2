@@ -1,0 +1,16 @@
+name = "do-alarm-test"
+main = "do9000.ts"
+compatibility_date = "2023-09-01"
+
+[[r2_buckets]]
+bucket_name = "do9000"
+binding = "R2_BUCKET"
+
+[durable_objects]
+bindings = [
+  { name = "COUNTER", class_name = "SubrequestCounter" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SubrequestCounter"]
