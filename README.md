@@ -9,6 +9,8 @@ This worker shows 2 proofs of concept:
 
 This worker uses no dependencies and leverages the `FixedLengthStream` web-standard.
 
+![](do9000.drawio.png)
+
 # Notes
 
 ## Idea: r2 zipper DO:
