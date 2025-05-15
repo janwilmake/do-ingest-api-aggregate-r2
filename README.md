@@ -11,6 +11,8 @@ This worker uses no dependencies and leverages the `FixedLengthStream` web-stand
 
 ![](do9000.drawio.png)
 
+Thread: https://x.com/janwilmake/status/1921554676081733782
+
 # Notes
 
 ## Idea: r2 zipper DO:

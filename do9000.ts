@@ -118,8 +118,111 @@ export class SubrequestCounter {
       await this.storage.put("itemCount", this.itemCount);
       await this.storage.put("status", this.status);
 
-      // Start the collection without waiting for it to complete
-      this.collectData(length);
+      this.collectionActive = true;
+      const encoder = new TextEncoder();
+
+      // Create a FixedLengthStream with the exact content length
+      const { readable, writable } = new FixedLengthStream(length);
+
+      // Create a writer for the stream
+      const writer = writable.getWriter();
+
+      // Start the upload to R2 using the readable end of the stream
+      const uploadPromise = this.env.R2_BUCKET.put(this.fileName, readable, {
+        httpMetadata: { contentType: "application/jsonl" },
+      });
+
+      try {
+        // Prepare buffer for collected data
+        let currentSize = 0;
+
+        // Continue fetching until we reach target length
+        while (currentSize < length && this.collectionActive) {
+          // Generate a random HN story ID
+          const id = 1 + Math.floor(Math.random() * 35000000);
+
+          // Fetch the item
+          const item = await this.fetchItem(id);
+
+          if (item) {
+            const timestamp = Date.now();
+            const enrichedItem = {
+              ...item,
+              _collected: timestamp,
+            };
+
+            // Convert to JSONL format
+            const jsonLine = JSON.stringify(enrichedItem) + "\n";
+            const itemSize = encoder.encode(jsonLine).length;
+
+            // Check if adding this item would exceed the target length
+            if (currentSize + itemSize > length) {
+              // Fill remaining space with dashes
+              const remainingBytes = length - currentSize;
+              if (remainingBytes > 0) {
+                const padding = "-".repeat(remainingBytes - 1) + "\n";
+                await writer.write(encoder.encode(padding));
+
+                currentSize += encoder.encode(padding).length;
+              }
+              break;
+            }
+
+            // Add item to writer
+            await writer.write(encoder.encode(jsonLine));
+
+            currentSize += itemSize;
+
+            // Update stats
+            this.itemCount++;
+            this.bytesCollected = currentSize;
+            this.lastItemTime = timestamp;
+
+            // Add to latest items cache
+            const itemResponse: ItemResponse = {
+              id: item.id,
+              data: item,
+              collected: new Date(timestamp).toISOString(),
+              byteSize: itemSize,
+            };
+
+            this.latestItems.unshift(itemResponse);
+
+            // Trim latest items if needed
+            if (this.latestItems.length > this.maxLatestItems) {
+              this.latestItems = this.latestItems.slice(0, this.maxLatestItems);
+            }
+
+            // Update storage with latest stats
+            await this.storage.put("bytesCollected", this.bytesCollected);
+            await this.storage.put("itemCount", this.itemCount);
+            await this.storage.put("lastItemTime", this.lastItemTime);
+            await this.storage.put("latestItems", this.latestItems);
+          }
+        }
+
+        try {
+          // Wait for the upload to complete
+          await writer.close();
+          await uploadPromise;
+
+          console.log(
+            `Successfully uploaded ${length} bytes to ${this.fileName}`,
+          );
+        } catch (error) {
+          console.error("Error uploading to R2:", error);
+          throw error;
+        }
+
+        this.status = "completed";
+        await this.storage.put("status", this.status);
+      } catch (error) {
+        console.error("Error during collection:", error);
+        this.status = "error";
+        await this.storage.put("status", this.status);
+      } finally {
+        this.collectionActive = false;
+      }
 
       return new Response(
         JSON.stringify({
@@ -176,121 +279,6 @@ export class SubrequestCounter {
         headers: { "Content-Type": "application/json" },
       },
     );
-  }
-
-  async collectData(targetLength: number): Promise<void> {
-    this.collectionActive = true;
-    const encoder = new TextEncoder();
-
-    try {
-      // Prepare buffer for collected data
-      let buffer = "";
-      let currentSize = 0;
-
-      // Continue fetching until we reach target length
-      while (currentSize < targetLength && this.collectionActive) {
-        // Generate a random HN story ID
-        const id = 1 + Math.floor(Math.random() * 35000000);
-
-        // Fetch the item
-        const item = await this.fetchItem(id);
-
-        if (item) {
-          const timestamp = Date.now();
-          const enrichedItem = {
-            ...item,
-            _collected: timestamp,
-          };
-
-          // Convert to JSONL format
-          const jsonLine = JSON.stringify(enrichedItem) + "\n";
-          const itemSize = encoder.encode(jsonLine).length;
-
-          // Check if adding this item would exceed the target length
-          if (currentSize + itemSize > targetLength) {
-            // Fill remaining space with dashes
-            const remainingBytes = targetLength - currentSize;
-            if (remainingBytes > 0) {
-              const padding = "-".repeat(remainingBytes - 1) + "\n";
-              buffer += padding;
-              currentSize += encoder.encode(padding).length;
-            }
-            break;
-          }
-
-          // Add item to buffer
-          buffer += jsonLine;
-          currentSize += itemSize;
-
-          // Update stats
-          this.itemCount++;
-          this.bytesCollected = currentSize;
-          this.lastItemTime = timestamp;
-
-          // Add to latest items cache
-          const itemResponse: ItemResponse = {
-            id: item.id,
-            data: item,
-            collected: new Date(timestamp).toISOString(),
-            byteSize: itemSize,
-          };
-
-          this.latestItems.unshift(itemResponse);
-
-          // Trim latest items if needed
-          if (this.latestItems.length > this.maxLatestItems) {
-            this.latestItems = this.latestItems.slice(0, this.maxLatestItems);
-          }
-
-          // Update storage with latest stats
-          await this.storage.put("bytesCollected", this.bytesCollected);
-          await this.storage.put("itemCount", this.itemCount);
-          await this.storage.put("lastItemTime", this.lastItemTime);
-          await this.storage.put("latestItems", this.latestItems);
-        }
-      }
-
-      // Once we have the exact content with known length, upload using FixedLengthStream
-      await this.uploadWithFixedLength(buffer, currentSize);
-
-      this.status = "completed";
-      await this.storage.put("status", this.status);
-    } catch (error) {
-      console.error("Error during collection:", error);
-      this.status = "error";
-      await this.storage.put("status", this.status);
-    } finally {
-      this.collectionActive = false;
-    }
-  }
-
-  async uploadWithFixedLength(content: string, length: number): Promise<void> {
-    try {
-      // Create a FixedLengthStream with the exact content length
-      const { readable, writable } = new FixedLengthStream(length);
-
-      // Create a writer for the stream
-      const writer = writable.getWriter();
-
-      // Start the upload to R2 using the readable end of the stream
-      const uploadPromise = this.env.R2_BUCKET.put(this.fileName, readable, {
-        contentType: "application/jsonl",
-      });
-
-      // Encode and write the content to the stream
-      const encoder = new TextEncoder();
-      const data = encoder.encode(content);
-      await writer.write(data);
-      await writer.close();
-
-      // Wait for the upload to complete
-      await uploadPromise;
-
-      console.log(`Successfully uploaded ${length} bytes to ${this.fileName}`);
-    } catch (error) {
-      console.error("Error uploading to R2:", error);
-      throw error;
-    }
   }
 
   async fetchItem(id: number): Promise<HackerNewsItem | null> {
